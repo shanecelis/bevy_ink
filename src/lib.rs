@@ -7,14 +7,16 @@ use bevy_mod_scripting::{
     GetTypeDependencies,
     lua::mlua::UserData,
     bindings::{
+        ArgMeta,
         InteropError,
         docgen::typed_through::{ThroughTypeInfo, TypedThrough},
         script_value::ScriptValue,
-        function::from::FromScript,
+        function::from::{Val, FromScript},
         IntoScript,
         WorldAccessGuard,
     }
 };
+use thiserror::Error;
 use std::any::TypeId;
 
 pub struct InkPlugin;
@@ -30,6 +32,17 @@ impl Plugin for InkPlugin {
         #[cfg(feature = "scripting")]
         lua::plugin(app);
     }
+}
+
+
+#[derive(Debug, Error)]
+pub enum InkError {
+    #[error("not loaded yet")]
+    NotLoaded,
+    #[error("no such story {0:?}")]
+    NoSuchStory(InkStoryRef),
+    #[error("story error: {0:?}")]
+    StoryError(#[from] StoryError)
 }
 
 #[derive(Default)]
@@ -54,6 +67,17 @@ impl InkStories {
             }
         }
     }
+
+    fn get(&self, ink_story_ref: &InkStoryRef) -> Result<&Story, InkError> {
+        self.0.get(ink_story_ref.index)
+            .map(|ink_story| match ink_story {
+                InkStory::Unloaded(_handle) => Err(InkError::NotLoaded),
+                InkStory::Loaded { handle: _, story } => match story {
+                    Ok(story) => Ok(story),
+                    Err(e) => Err(InkError::from(e.clone())),
+                }
+            }).unwrap_or_else(|| Err(InkError::NoSuchStory(*ink_story_ref)))
+    }
 }
 
 enum InkStory {
@@ -63,7 +87,14 @@ enum InkStory {
 
 #[derive(Debug, Clone, Copy, Reflect)]
 #[cfg_attr(feature = "scripting", derive(GetTypeDependencies))]
-struct InkStoryRef { index: usize }
+pub struct InkStoryRef { index: usize }
+
+#[cfg(feature = "scripting")]
+impl ArgMeta for InkStoryRef {
+    fn default_value() -> Option<ScriptValue> {
+        None
+    }
+}
 
 #[cfg(feature = "scripting")]
 impl IntoScript for InkStoryRef {
@@ -181,6 +212,20 @@ mod lua {
                          "ink_load",
                      ))
                  }
+            },
+        );
+
+    NamespaceBuilder::<InkStoryRef>::new(app.world_mut())
+        .register(
+            "can_continue",
+            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<bool, InteropError> {
+                let world = ctx.world()?;
+                world.with_global_access(|world| {
+                    let stories = world.non_send_resource::<InkStories>();
+                    stories.get(&this)
+                        .map(|story| story.can_continue())
+                        .map_err(|e| InteropError::external(Box::new(e)))
+                })?
             },
         );
     }

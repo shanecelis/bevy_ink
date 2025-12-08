@@ -3920,6 +3920,7 @@ dependencies = [
  "bevy_mod_scripting",
  "bladeink",
  "nano9",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

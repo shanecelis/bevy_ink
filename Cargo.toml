@@ -8,7 +8,11 @@ bevy = "0.16.1"
 bevy_mod_scripting = "0.16.0"
 bladeink = "1.2.1"
 nano9 = "0.1.0-alpha.4"
+thiserror = "2.0.17"
 
 [features]
 default = [ "scripting" ]
 scripting = []
+
+[patch.crates-io]
+bladeink = { path = "../blade-ink-rs" }
