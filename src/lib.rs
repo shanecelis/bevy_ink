@@ -7,6 +7,8 @@ use bevy_mod_scripting::{
     GetTypeDependencies,
     lua::mlua::UserData,
     bindings::{
+        IntoScriptRef,
+        ReflectReference,
         ArgMeta,
         InteropError,
         docgen::typed_through::{ThroughTypeInfo, TypedThrough},
@@ -25,6 +27,7 @@ impl Plugin for InkPlugin {
     fn build(&self, app: &mut App) {
         app
             .register_type::<InkStoryRef>()
+            .add_event::<InkEvent>()
             .init_non_send_resource::<InkStories>()
             .init_asset::<InkText>()
             .init_asset_loader::<InkTextLoader>()
@@ -100,35 +103,15 @@ enum InkStory {
 #[cfg_attr(feature = "scripting", derive(GetTypeDependencies))]
 pub struct InkStoryRef { index: usize }
 
-#[cfg(feature = "scripting")]
-impl ArgMeta for InkStoryRef {
-    fn default_value() -> Option<ScriptValue> {
-        None
-    }
-}
-
-#[cfg(feature = "scripting")]
-impl IntoScript for InkStoryRef {
-    fn into_script(self, _world: WorldAccessGuard<'_>) -> Result<ScriptValue, InteropError> {
-        Ok(ScriptValue::Integer(self.index as i64))
-    }
-}
-
-#[cfg(feature = "scripting")]
-impl FromScript for InkStoryRef {
-    type This<'w> = Self;
-    fn from_script(value: ScriptValue, _world: WorldAccessGuard<'_>) -> Result<Self::This<'_>, InteropError> {
-        match value {
-            ScriptValue::Integer(n) => Ok(InkStoryRef { index: n as usize }),
-            x => Err(InteropError::value_mismatch(TypeId::of::<i64>(), x)),
-        }
-    }
-}
-
-#[cfg(feature = "scripting")]
-impl TypedThrough for InkStoryRef {
-    fn through_type_info() -> ThroughTypeInfo {
-        ThroughTypeInfo::TypeInfo(<InkStoryRef as bevy::reflect::Typed>::type_info())
+impl InkStoryRef {
+    #[cfg(feature = "scripting")]
+    pub fn into_script_ref(self, world: WorldAccessGuard) -> Result<ScriptValue, InteropError> {
+        let reference = {
+            let allocator = world.allocator();
+            let mut allocator = allocator.write();
+            ReflectReference::new_allocated(self, &mut allocator)
+        };
+        ReflectReference::into_script_ref(reference, world)
     }
 }
 
@@ -203,19 +186,22 @@ mod lua {
         NamespaceBuilder::<GlobalNamespace>::new_unregistered(world).register(
             "ink_load",
             |ctx: FunctionCallContext,
-             path: String| {
+             path: String| -> Result<ScriptValue, InteropError> {
                  let world_guard = ctx.world()?;
                  let raid = ReflectAccessId::for_global();
                  if world_guard.claim_global_access() {
-                     let world = world_guard.as_unsafe_world_cell()?;
-                     let world = unsafe { world.world_mut() };
-                     let ink_text = {
-                         let asset_server = world.resource::<AssetServer>();
-                         asset_server.load::<InkText>(&path)
+                     let ink_story_ref = {
+                         let world = world_guard.as_unsafe_world_cell()?;
+                         let world = unsafe { world.world_mut() };
+                         let ink_text = {
+                             let asset_server = world.resource::<AssetServer>();
+                             asset_server.load::<InkText>(&path)
+                         };
+                         let mut ink_stories = world.non_send_resource_mut::<InkStories>();
+                         ink_stories.insert(ink_text)
                      };
-                     let mut ink_stories = world.non_send_resource_mut::<InkStories>();
-                     let ink_story_ref = ink_stories.insert(ink_text);
-                     Ok(ink_story_ref)
+                     unsafe { world_guard.release_global_access() };
+                     ink_story_ref.into_script_ref(world_guard)
                  } else {
                      Err(InteropError::cannot_claim_access(
                          raid,
