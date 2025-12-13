@@ -6,8 +6,10 @@ use bladeink::{story::Story, story_error::StoryError};
 #[cfg(feature = "scripting")]
 use bevy_mod_scripting::{
     GetTypeDependencies,
-    lua::mlua::UserData,
+    lua::{LuaScriptingPlugin, mlua::UserData},
+    prelude::{callback_labels, event_handler, ScriptCallbackEvent},
     bindings::{
+        AppReflectAllocator,
         IntoScriptRef,
         ReflectReference,
         ArgMeta,
@@ -86,6 +88,8 @@ fn hot_reload_on_modify(
     mut ink_stories: NonSendMut<InkStories>,
     // We need to re-fetch the handle while pending.
     ink_loads: Query<(Entity, &InkLoad)>,
+    mut writer: EventWriter<ScriptCallbackEvent>,
+    mut allocator: ResMut<AppReflectAllocator>
 ) {
     // For each modified asset, rebuild the runtime for all referencing entities.
     for ev in events.read() {
@@ -103,9 +107,15 @@ fn hot_reload_on_modify(
                 continue;
             }
             info!("reloading ink on {entity}");
-            if let Some(ink_text) = ink_texts.get(&ink.0)
-            && let Err(err) = ink_stories.try_insert(entity, &ink_text) {
-                error!("Error parsing ink reload in {entity}: {err}");
+            if let Some(ink_text) = ink_texts.get(&ink.0) {
+                match ink_stories.try_insert(entity, &ink_text) {
+                    Ok(last_story) =>{
+                        send_on_story_reload(InkStoryRef(entity), &mut writer, &mut allocator);
+                    }
+                    Err(err) => {
+                        error!("Error parsing ink reload in {entity}: {err}");
+                    }
+                }
             }
 
         }
@@ -203,6 +213,21 @@ impl AssetLoader for InkTextLoader {
     }
 }
 
+callback_labels!(OnStoryReload => "on_story_reload");
+
+fn send_on_story_reload(story_ref: InkStoryRef,
+                        writer: &mut EventWriter<ScriptCallbackEvent>,
+                        allocator: &mut AppReflectAllocator) {
+
+    let mut allocator = allocator.write();
+    let story_ref = ReflectReference::new_allocated(story_ref, &mut allocator);
+
+    writer.send(ScriptCallbackEvent::new_for_all_scripts(
+        OnStoryReload,
+        vec![story_ref.into()],
+    ));
+}
+
 #[cfg(feature = "scripting")]
 mod lua {
     use super::*;
@@ -214,7 +239,10 @@ mod lua {
         script_function::FunctionCallContext,
     }};
     pub(crate) fn plugin(app: &mut App) {
+        app
+            .add_systems(PostUpdate, event_handler::<OnStoryReload, LuaScriptingPlugin>);
         let world = app.world_mut();
+
 
         NamespaceBuilder::<GlobalNamespace>::new_unregistered(world).register(
             "ink_load",
