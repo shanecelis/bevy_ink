@@ -1,42 +1,25 @@
-use bevy::prelude::*;
-use bevy::platform::collections::{HashMap, HashSet};
 use bevy::asset::{AssetEvent, AssetLoader, LoadContext, io::Reader};
+use bevy::platform::collections::{HashMap, HashSet};
+use bevy::prelude::*;
 use bevy::reflect::TypeRegistry;
 use bladeink::{story::Story, story_error::StoryError};
-#[cfg(feature = "scripting")]
-use bevy_mod_scripting::{
-    GetTypeDependencies,
-    lua::{LuaScriptingPlugin, mlua::UserData},
-    prelude::{callback_labels, event_handler, ScriptCallbackEvent},
-    bindings::{
-        AppReflectAllocator,
-        IntoScriptRef,
-        ReflectReference,
-        ArgMeta,
-        InteropError,
-        docgen::typed_through::{ThroughTypeInfo, TypedThrough},
-        script_value::ScriptValue,
-        function::from::{Val, FromScript},
-        IntoScript,
-        WorldAccessGuard,
-    }
-};
-use thiserror::Error;
 use std::any::TypeId;
+use thiserror::Error;
+
+#[cfg(feature = "scripting")]
+pub mod scripting;
 
 pub struct InkPlugin;
 
 impl Plugin for InkPlugin {
     fn build(&self, app: &mut App) {
-        app
-            .register_type::<InkStoryRef>()
-            .add_event::<InkEvent>()
+        app.add_event::<InkEvent>()
             .init_non_send_resource::<InkStories>()
             .init_asset::<InkText>()
             .init_asset_loader::<InkTextLoader>()
             .add_systems(Update, (load_on_add_then_poll, hot_reload_on_modify));
         #[cfg(feature = "scripting")]
-        lua::plugin(app);
+        app.add_plugins(scripting::plugin);
     }
 }
 
@@ -45,31 +28,33 @@ pub enum InkError {
     #[error("not loaded yet")]
     NotLoaded,
     #[error("no such story {0:?}")]
-    NoSuchStory(InkStoryRef),
+    NoSuchStory(Entity),
     #[error("story error: {0:?}")]
-    StoryError(#[from] StoryError)
+    StoryError(#[from] StoryError),
+}
+
+#[derive(Debug, Event)]
+pub enum InkEvent {
+    OnStoryReload(Entity),
 }
 
 #[derive(Default)]
-struct InkStories(HashMap<Entity, Story>);
+pub struct InkStories(pub HashMap<Entity, Story>);
 
 impl InkStories {
-    fn try_insert(&mut self, id: Entity, ink: &InkText) -> Result<Option<Story>, StoryError> {
-        Story::new(&ink.0)
-            .inspect(|_| { info!("inserted story"); })
-            .map(|story| self.0.insert(id, story))
+    /// Returns the prior story if there was one on success. Otherwise returns
+    /// the error.
+    pub fn try_parse(&mut self, id: Entity, ink: &InkText) -> Result<Option<Story>, StoryError> {
+        Story::new(&ink.0).map(|story| self.0.insert(id, story))
     }
 
-    fn get(&self, ink_story_ref: &InkStoryRef) -> Result<&Story, InkError> {
-        self.0.get(&ink_story_ref.0)
-            .ok_or(InkError::NotLoaded)
+    pub fn get(&self, ink_story_ref: Entity) -> Result<&Story, InkError> {
+        self.0.get(&ink_story_ref).ok_or(InkError::NotLoaded)
     }
 
-    fn get_mut(&mut self, ink_story_ref: &InkStoryRef) -> Result<&mut Story, InkError> {
-        self.0.get_mut(&ink_story_ref.0)
-            .ok_or(InkError::NotLoaded)
+    pub fn get_mut(&mut self, ink_story_ref: Entity) -> Result<&mut Story, InkError> {
+        self.0.get_mut(&ink_story_ref).ok_or(InkError::NotLoaded)
     }
-
 }
 
 #[derive(Debug, Component, Clone)]
@@ -84,12 +69,10 @@ pub struct InkText(pub String);
 fn hot_reload_on_modify(
     ink_texts: Res<Assets<InkText>>,
     mut events: EventReader<AssetEvent<InkText>>,
-    mut commands: Commands,
     mut ink_stories: NonSendMut<InkStories>,
     // We need to re-fetch the handle while pending.
     ink_loads: Query<(Entity, &InkLoad)>,
-    mut writer: EventWriter<ScriptCallbackEvent>,
-    mut allocator: ResMut<AppReflectAllocator>
+    mut writer: EventWriter<InkEvent>,
 ) {
     // For each modified asset, rebuild the runtime for all referencing entities.
     for ev in events.read() {
@@ -108,16 +91,15 @@ fn hot_reload_on_modify(
             }
             info!("reloading ink on {entity}");
             if let Some(ink_text) = ink_texts.get(&ink.0) {
-                match ink_stories.try_insert(entity, &ink_text) {
-                    Ok(last_story) =>{
-                        send_on_story_reload(InkStoryRef(entity), &mut writer, &mut allocator);
+                match ink_stories.try_parse(entity, &ink_text) {
+                    Ok(last_story) => {
+                        writer.write(InkEvent::OnStoryReload(entity));
                     }
                     Err(err) => {
                         error!("Error parsing ink reload in {entity}: {err}");
                     }
                 }
             }
-
         }
     }
 }
@@ -149,7 +131,7 @@ pub fn load_on_add_then_poll(
         };
 
         if let Some(ink) = ink_texts.get(&story.0) {
-            match ink_stories.try_insert(e, ink) {
+            match ink_stories.try_parse(e, ink) {
                 Ok(last_story) => {
                     commands.entity(e).insert(InkStory);
                 }
@@ -164,33 +146,8 @@ pub fn load_on_add_then_poll(
     });
 }
 
-#[derive(Debug, Clone, Copy, Reflect)]
-#[cfg_attr(feature = "scripting", derive(GetTypeDependencies))]
-pub struct InkStoryRef(pub Entity);
-
-impl InkStoryRef {
-    #[cfg(feature = "scripting")]
-    pub fn into_script_ref(self, world: WorldAccessGuard) -> Result<ScriptValue, InteropError> {
-        let reference = {
-            let allocator = world.allocator();
-            let mut allocator = allocator.write();
-            ReflectReference::new_allocated(self, &mut allocator)
-        };
-        ReflectReference::into_script_ref(reference, world)
-    }
-}
-
-#[cfg(feature = "scripting")]
-impl UserData for InkStoryRef {}
-
-
 #[derive(Default)]
 pub struct InkTextLoader;
-
-#[derive(Event)]
-pub enum InkEvent {
-    Load(Handle<InkText>),
-}
 
 impl AssetLoader for InkTextLoader {
     type Asset = InkText;
@@ -198,9 +155,10 @@ impl AssetLoader for InkTextLoader {
     type Error = std::io::Error;
 
     fn extensions(&self) -> &[&str] {
-        &["ink.json",
-          #[cfg(feature = "inklecate")]
-          "ink",
+        &[
+            "ink.json",
+            #[cfg(feature = "inklecate")]
+            "ink",
         ]
     }
 
@@ -212,11 +170,11 @@ impl AssetLoader for InkTextLoader {
     ) -> Result<Self::Asset, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        
+
         // Check if the file extension is "ink" and compile it with inklecate
         let path = load_context.path();
         let extension = path.extension().and_then(|ext| ext.to_str());
-        
+
         #[cfg(feature = "inklecate")]
         if extension == Some("ink") {
             use std::io::Write;
@@ -232,132 +190,9 @@ impl AssetLoader for InkTextLoader {
 
             let output = child.wait_with_output()?;
             let compiled_json = String::from_utf8_lossy(&output.stdout);
-            
-            Ok(InkText(compiled_json.into_owned()))
-        } else {
-            Ok(InkText(String::from_utf8_lossy(&bytes).into()))
+
+            return Ok(InkText(compiled_json.into_owned()));
         }
-    }
-}
-
-callback_labels!(OnStoryReload => "on_story_reload");
-
-fn send_on_story_reload(story_ref: InkStoryRef,
-                        writer: &mut EventWriter<ScriptCallbackEvent>,
-                        allocator: &mut AppReflectAllocator) {
-
-    let mut allocator = allocator.write();
-    let story_ref = ReflectReference::new_allocated(story_ref, &mut allocator);
-
-    writer.send(ScriptCallbackEvent::new_for_all_scripts(
-        OnStoryReload,
-        vec![story_ref.into()],
-    ));
-}
-
-#[cfg(feature = "scripting")]
-mod lua {
-    use super::*;
-
-    use bevy_mod_scripting::bindings::{
-        ReflectAccessId,
-        function::{
-        namespace::{GlobalNamespace, NamespaceBuilder},
-        script_function::FunctionCallContext,
-    }};
-    pub(crate) fn plugin(app: &mut App) {
-        app
-            .add_systems(PostUpdate, event_handler::<OnStoryReload, LuaScriptingPlugin>);
-        let world = app.world_mut();
-
-
-        NamespaceBuilder::<GlobalNamespace>::new_unregistered(world).register(
-            "ink_load",
-            |ctx: FunctionCallContext,
-             path: String| -> Result<ScriptValue, InteropError> {
-                 let world_guard = ctx.world()?;
-                 let raid = ReflectAccessId::for_global();
-                 if world_guard.claim_global_access() {
-                     let ink_story_ref = {
-                         let world = world_guard.as_unsafe_world_cell()?;
-                         let world = unsafe { world.world_mut() };
-                         let ink_text = {
-                             let asset_server = world.resource::<AssetServer>();
-                             asset_server.load::<InkText>(&path)
-                         };
-                         let id = world.spawn(InkLoad(ink_text)).id();
-                         InkStoryRef(id)
-                     };
-                     unsafe { world_guard.release_global_access() };
-                     ink_story_ref.into_script_ref(world_guard)
-                 } else {
-                     Err(InteropError::cannot_claim_access(
-                         raid,
-                         world_guard.get_access_location(raid),
-                         "ink_load",
-                     ))
-                 }
-            },
-        );
-
-    NamespaceBuilder::<InkStoryRef>::new(app.world_mut())
-        .register(
-            "can_continue",
-            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<bool, InteropError> {
-                let world = ctx.world()?;
-                world.with_global_access(|world| {
-                    let stories = world.non_send_resource::<InkStories>();
-                    stories.get(&this)
-                        .map(|story| story.can_continue())
-                        .map_err(|e| InteropError::external(Box::new(e)))
-                })?
-            },
-        )
-        .register(
-            "is_loaded",
-            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<bool, InteropError> {
-                let world = ctx.world()?;
-                world.with_global_access(|world| {
-                    let stories = world.non_send_resource::<InkStories>();
-                    stories.get(&this).is_ok()
-                })
-            },
-        )
-        .register(
-            "get_current_choices",
-            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<Vec<String>, InteropError> {
-                let world = ctx.world()?;
-                world.with_global_access(|world| {
-                    let stories = world.non_send_resource::<InkStories>();
-                    stories.get(&this)
-                        .map(|story| story.get_current_choices().iter().map(|choice| choice.text.clone()).collect())
-                        .map_err(|e| InteropError::external(Box::new(e)))
-                })?
-            },
-        )
-        .register(
-            "choose_choice_index",
-            |ctx: FunctionCallContext, this: Val<InkStoryRef>, index: usize| -> Result<(), InteropError> {
-                let world = ctx.world()?;
-                world.with_global_access(|world| {
-                    let mut stories = world.non_send_resource_mut::<InkStories>();
-                    stories.get_mut(&this)
-                        .and_then(|story| story.choose_choice_index(index).map_err(InkError::from))
-                        .map_err(|e| InteropError::external(Box::new(e)))
-                })?
-            },
-        )
-        .register(
-            "cont",
-            |ctx: FunctionCallContext, this: Val<InkStoryRef>| -> Result<String, InteropError> {
-                let world = ctx.world()?;
-                world.with_global_access(|world| {
-                    let mut stories = world.non_send_resource_mut::<InkStories>();
-                    stories.get_mut(&this)
-                        .and_then(|story| story.cont().map_err(InkError::from))
-                        .map_err(|e| InteropError::external(Box::new(e)))
-                })?
-            },
-        );
+        Ok(InkText(String::from_utf8_lossy(&bytes).into()))
     }
 }
