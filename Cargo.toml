@@ -11,7 +11,8 @@ nano9 = "0.1.0-alpha.4"
 thiserror = "2.0.17"
 
 [features]
-default = [ "scripting" ]
+default = [ "scripting", "inklecate" ]
+inklecate = []
 scripting = []
 
 [patch.crates-io]

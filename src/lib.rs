@@ -198,18 +198,45 @@ impl AssetLoader for InkTextLoader {
     type Error = std::io::Error;
 
     fn extensions(&self) -> &[&str] {
-        &["ink"]
+        &["ink.json",
+          #[cfg(feature = "inklecate")]
+          "ink",
+        ]
     }
 
     async fn load(
         &self,
         reader: &mut dyn Reader,
         _settings: &Self::Settings,
-        _load_context: &mut LoadContext<'_>,
+        load_context: &mut LoadContext<'_>,
     ) -> Result<Self::Asset, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        Ok(InkText(String::from_utf8_lossy(&bytes).into()))
+        
+        // Check if the file extension is "ink" and compile it with inklecate
+        let path = load_context.path();
+        let extension = path.extension().and_then(|ext| ext.to_str());
+        
+        #[cfg(feature = "inklecate")]
+        if extension == Some("ink") {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let mut child = Command::new("inklecate")
+                .args(["-o", "/dev/stdout", "/dev/stdin"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?;
+
+            child.stdin.as_mut().unwrap().write_all(&bytes)?;
+
+            let output = child.wait_with_output()?;
+            let compiled_json = String::from_utf8_lossy(&output.stdout);
+            
+            Ok(InkText(compiled_json.into_owned()))
+        } else {
+            Ok(InkText(String::from_utf8_lossy(&bytes).into()))
+        }
     }
 }
 
