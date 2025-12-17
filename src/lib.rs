@@ -3,6 +3,9 @@ use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::reflect::TypeRegistry;
 use bladeink::{story::Story, story_error::StoryError};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use thiserror::Error;
 
 #[cfg(feature = "scripting")]
@@ -30,6 +33,10 @@ pub enum InkError {
     NoSuchStory(Entity),
     #[error("story error: {0:?}")]
     StoryError(#[from] StoryError),
+    #[error("no processor defined to translate .ink to .ink.json")]
+    NoProcessor,
+    #[error("io error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[derive(Debug, Event, Clone)]
@@ -145,26 +152,75 @@ pub fn load_on_add_then_poll(
     });
 }
 
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
+pub enum InkProcessor {
+    #[default]
+    Inklecate,
+    Custom {
+        command: String,
+        arguments: Vec<String>,
+    },
+}
+
+impl InkProcessor {
+    pub fn command(&self) -> Command {
+        match self {
+            InkProcessor::Inklecate => {
+                let mut c = Command::new("inklecate");
+                c.args(["-o", "/dev/stdout", "/dev/stdin"]);
+                c
+            }
+            InkProcessor::Custom { command, arguments } => {
+                let mut c = Command::new(command);
+                c.args(arguments);
+                c
+            }
+        }
+    }
+    // pub fn command(&self) -> &str {
+    //     match self {
+    //         InkProcessor::Inklecate => "inklecate",
+    //         InkProcessor::Custom { command, .. } => &command,
+    //     }
+    // }
+
+    // pub fn arguments(&self) -> &[&str] {
+    //     match self {
+    //         InkProcessor::Inklecate => &["-o", "/dev/stdout", "/dev/stdin"],
+    //         InkProcessor::Custom { arguments, .. } => &arguments,
+    //     }
+    // }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoaderSettings {
+    pub processor: Option<InkProcessor>,
+}
+
+impl Default for LoaderSettings {
+    fn default() -> Self {
+        Self {
+            processor: Some(InkProcessor::default()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct InkTextLoader;
 
 impl AssetLoader for InkTextLoader {
     type Asset = InkText;
-    type Settings = ();
-    type Error = std::io::Error;
+    type Settings = LoaderSettings;
+    type Error = InkError;
 
     fn extensions(&self) -> &[&str] {
-        &[
-            "ink.json",
-            #[cfg(feature = "inklecate")]
-            "ink",
-        ]
+        &["ink.json", "ink"]
     }
 
     async fn load(
         &self,
         reader: &mut dyn Reader,
-        _settings: &Self::Settings,
+        settings: &Self::Settings,
         load_context: &mut LoadContext<'_>,
     ) -> Result<Self::Asset, Self::Error> {
         let mut bytes = Vec::new();
@@ -174,24 +230,25 @@ impl AssetLoader for InkTextLoader {
         let path = load_context.path();
         let extension = path.extension().and_then(|ext| ext.to_str());
 
-        #[cfg(feature = "inklecate")]
         if extension == Some("ink") {
-            use std::io::Write;
-            use std::process::{Command, Stdio};
+            if let Some(processor) = &settings.processor {
+                let mut child = processor
+                    .command()
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()?;
 
-            let mut child = Command::new("inklecate")
-                .args(["-o", "/dev/stdout", "/dev/stdin"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?;
+                child.stdin.as_mut().unwrap().write_all(&bytes)?;
 
-            child.stdin.as_mut().unwrap().write_all(&bytes)?;
+                let output = child.wait_with_output()?;
+                let compiled_json = String::from_utf8_lossy(&output.stdout);
 
-            let output = child.wait_with_output()?;
-            let compiled_json = String::from_utf8_lossy(&output.stdout);
-
-            return Ok(InkText(compiled_json.into_owned()));
+                Ok(InkText(compiled_json.into_owned()))
+            } else {
+                Err(InkError::NoProcessor)
+            }
+        } else {
+            Ok(InkText(String::from_utf8_lossy(&bytes).into()))
         }
-        Ok(InkText(String::from_utf8_lossy(&bytes).into()))
     }
 }

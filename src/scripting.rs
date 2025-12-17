@@ -2,10 +2,8 @@ use super::*;
 use bevy_mod_scripting::{
     GetTypeDependencies,
     bindings::{
-        AppReflectAllocator, InteropError, IntoScriptRef, ReflectReference,
-        WorldAccessGuard,
-        function::from::Val,
-        script_value::ScriptValue,
+        AppReflectAllocator, InteropError, IntoScriptRef, ReflectReference, WorldAccessGuard,
+        function::from::Val, script_value::ScriptValue,
     },
     lua::{LuaScriptingPlugin, mlua::UserData},
     prelude::{ScriptCallbackEvent, callback_labels, event_handler},

@@ -3251,6 +3251,7 @@ dependencies = [
  "bevy",
  "bevy_mod_scripting",
  "bladeink",
+ "serde",
  "thiserror 2.0.17",
 ]
 
