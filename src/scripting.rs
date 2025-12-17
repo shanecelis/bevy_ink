@@ -8,6 +8,7 @@ use bevy_mod_scripting::{
     lua::{LuaScriptingPlugin, mlua::UserData},
     prelude::{ScriptCallbackEvent, callback_labels, event_handler},
 };
+use bladeink::choice::Choice;
 
 pub(crate) fn plugin(app: &mut App) {
     app.register_type::<InkStoryRef>()
@@ -125,21 +126,57 @@ mod lua {
                 },
             )
             .register(
+                "get_current_tags",
+                |ctx: FunctionCallContext,
+                 this: Val<InkStoryRef>|
+                 -> Result<ScriptValue, InteropError> {
+                    let world = ctx.world()?;
+                    world.with_global_access(|world| {
+                        let mut stories = world.non_send_resource_mut::<InkStories>();
+                        stories
+                            .get_mut(this.0.0)
+                            .and_then(|story|
+                                story
+                                    .get_current_tags()
+                                    .map(to_tags)
+                                    .map_err(|e| InkError::from(e))
+                            )
+                            .map_err(|e| InteropError::external(Box::new(e)))
+                    })?
+                },
+            )
+            .register(
                 "get_current_choices",
                 |ctx: FunctionCallContext,
                  this: Val<InkStoryRef>|
-                 -> Result<Vec<String>, InteropError> {
+                 -> Result<ScriptValue, InteropError> {
+                    fn choice_to_script_value(choice: &Choice) -> ScriptValue {
+                        let mut map: HashMap<String, ScriptValue> = HashMap::new();
+                        map.insert(
+                            "text".to_string(),
+                            ScriptValue::String(choice.text.clone().into()),
+                        );
+                        let tags: Vec<ScriptValue> = choice.tags
+                            .iter()
+                            .inspect(|tag| info!("tag '{tag}'"))
+                            .map(|tag| ScriptValue::String(tag.clone().into()))
+                            .collect();
+                        map.insert(
+                            "tags".to_string(),
+                            ScriptValue::List(tags));
+                        ScriptValue::Map(map)
+                    }
                     let world = ctx.world()?;
                     world.with_global_access(|world| {
                         let stories = world.non_send_resource::<InkStories>();
                         stories
                             .get(this.0.0)
                             .map(|story| {
-                                story
+                                ScriptValue::List(story
                                     .get_current_choices()
                                     .iter()
-                                    .map(|choice| choice.text.clone())
-                                    .collect()
+                                                  .map(|choice| choice_to_script_value(choice))
+                                    .collect())
                             })
                             .map_err(|e| InteropError::external(Box::new(e)))
                     })?
@@ -178,5 +215,13 @@ mod lua {
                     })?
                 },
             );
+    }
+
+    fn to_tags(tags: Vec<String>) -> ScriptValue {
+        let tags: Vec<ScriptValue> = tags
+            .into_iter()
+            .map(|tag| ScriptValue::String(tag.into()))
+            .collect();
+        ScriptValue::List(tags)
     }
 }

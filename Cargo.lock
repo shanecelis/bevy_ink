@@ -770,6 +770,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ink"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_mod_scripting",
+ "bladeink",
+ "serde",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "bevy_input"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3242,17 +3253,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "unicode-ident",
-]
-
-[[package]]
-name = "nano9_ink"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_mod_scripting",
- "bladeink",
- "serde",
- "thiserror 2.0.17",
 ]
 
 [[package]]
